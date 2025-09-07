@@ -50,9 +50,30 @@ class SkipStrategyException(Exception):
 
 
 def parse(requested_trees, logger):
+    """Parse a strategy description into a :class:`actions.strategy.Strategy`.
+
+    ``requested_trees`` may be supplied either as the historical string
+    representation or as a structured dictionary/JSON object.  When a dictionary
+    (or JSON string) is provided, it is validated and converted using the new
+    schema defined in :mod:`actions.tree` and :mod:`actions.strategy`.
     """
-    Parses a string representation of a solution into its object form.
-    """
+
+    # If a dictionary was provided, assume it already represents the schema
+    if isinstance(requested_trees, dict):
+        return actions.strategy.Strategy.from_dict(requested_trees, logger)
+
+    # If this looks like a JSON object, attempt to parse it as such
+    if isinstance(requested_trees, str) and requested_trees.strip().startswith("{"):
+        try:
+            data = json.loads(requested_trees)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            return actions.strategy.Strategy.from_dict(data, logger)
+
+    if not isinstance(requested_trees, str):
+        raise ValueError("Strategy description must be string or dict")
+
     # First, strip off any hanging quotes at beginning/end of the strategy
     if requested_trees.startswith("\""):
         requested_trees = requested_trees[1:]
