@@ -1,15 +1,62 @@
-"""
-Defines an action tree. Action trees are comprised of a trigger and a tree of actions.
+"""Action tree utilities and dataclasses.
+
+This module previously relied purely on a string representation for action
+trees.  In order to support external tools and easier validation we now expose
+structured (JSON serialisable) schemas.  The schemas are simple dataclasses
+representing a trigger and a nested set of actions.  ``actions.utils.parse``
+and :pyclass:`actions.strategy.Strategy` make use of these helpers to parse and
+serialise strategies.
 """
 
 import random
 import re
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 import anytree
 from anytree.exporter import DotExporter
 
 import actions.utils
 import actions.trigger
+import actions.action
+
+
+@dataclass
+class ActionNodeSchema:
+    """Serialized representation of a single action node.
+
+    Attributes
+    ----------
+    action: str
+        String representation of the action.  This is the same format used in
+        the legacy string strategies, e.g. ``"drop"`` or
+        ``"tamper{TCP:flags:replace:R}"``.
+    left: Optional["ActionNodeSchema"]
+        Sub action executed on the left branch.
+    right: Optional["ActionNodeSchema"]
+        Sub action executed on the right branch.  Only branching actions may
+        specify a right node.
+    """
+
+    action: str
+    left: Optional["ActionNodeSchema"] = None
+    right: Optional["ActionNodeSchema"] = None
+
+
+@dataclass
+class TreeSchema:
+    """Serialized representation of an :class:`ActionTree`.
+
+    Parameters
+    ----------
+    trigger: str
+        String representation of the trigger (``protocol:field:value[:gas]``)
+    action: Optional[ActionNodeSchema]
+        Root action for the tree.  ``None`` denotes an empty tree.
+    """
+
+    trigger: str
+    action: Optional[ActionNodeSchema] = None
 
 
 class ActionTreeParseError(Exception):
@@ -36,6 +83,85 @@ class ActionTree():
         self.direction = direction
         self.environment_id = None
         self.ran = False
+
+    # ------------------------------------------------------------------
+    #  Serialization helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _node_to_dict(node):
+        """Serialise an action node into :class:`ActionNodeSchema` form."""
+        if not node:
+            return None
+        data = {"action": str(node)}
+        left = ActionTree._node_to_dict(getattr(node, "left", None))
+        right = ActionTree._node_to_dict(getattr(node, "right", None))
+        if left is not None:
+            data["left"] = left
+        if right is not None:
+            data["right"] = right
+        return data
+
+    @staticmethod
+    def _node_from_dict(direction, data, logger):
+        """Build an action node from a serialised representation."""
+        if not data:
+            return None
+        action_obj = actions.action.Action.parse_action(data["action"], direction, logger)
+        if not action_obj:
+            raise ValueError("Unknown action %s" % data["action"])
+        action_obj.left = ActionTree._node_from_dict(direction, data.get("left"), logger)
+        action_obj.right = ActionTree._node_from_dict(direction, data.get("right"), logger)
+        return action_obj
+
+    @staticmethod
+    def _validate_node_dict(direction, data, logger):
+        """Validate a serialised action node.
+
+        Ensures the action exists and that child placement obeys terminal and
+        branching constraints.
+        """
+        if not isinstance(data, dict) or "action" not in data:
+            raise ValueError("Action node must be a dict with an 'action' key")
+        action_obj = actions.action.Action.parse_action(data["action"], direction, logger)
+        if not action_obj:
+            raise ValueError("Unknown action %s" % data["action"])
+        if action_obj.terminal and (data.get("left") or data.get("right")):
+            raise ValueError("Terminal action %s cannot have children" % data["action"])
+        if not action_obj.branching and data.get("right"):
+            raise ValueError("Non-branching action %s cannot have right child" % data["action"])
+        if data.get("left"):
+            ActionTree._validate_node_dict(direction, data["left"], logger)
+        if data.get("right"):
+            ActionTree._validate_node_dict(direction, data["right"], logger)
+
+    def to_dict(self):
+        """Serialise this tree into :class:`TreeSchema` form."""
+        return {
+            "trigger": str(self.trigger) if self.trigger else "",
+            "action": ActionTree._node_to_dict(self.action_root),
+        }
+
+    @classmethod
+    def from_dict(cls, direction, data, logger):
+        """Create an :class:`ActionTree` from a :class:`TreeSchema` dict."""
+        cls.validate_dict(data, direction, logger)
+        tree = cls(direction)
+        tree.trigger = actions.trigger.Trigger.parse(data["trigger"])
+        tree.action_root = ActionTree._node_from_dict(direction, data.get("action"), logger)
+        return tree
+
+    @staticmethod
+    def validate_dict(data, direction, logger):
+        """Validate a :class:`TreeSchema` dictionary."""
+        if not isinstance(data, dict):
+            raise ValueError("Tree must be a dictionary")
+        if "trigger" not in data:
+            raise ValueError("Tree missing trigger")
+        if actions.trigger.Trigger.parse(data["trigger"]) is None:
+            raise ValueError("Invalid trigger %s" % data["trigger"])
+        if "action" in data and data["action"] is not None:
+            ActionTree._validate_node_dict(direction, data["action"], logger)
 
     def initialize(self, num_actions, environment_id, allow_terminal=True, disabled=None):
         """

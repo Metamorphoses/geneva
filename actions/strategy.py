@@ -1,7 +1,34 @@
 import random
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 import actions.utils
 import actions.tree
+
+
+@dataclass
+class StrategySchema:
+    """Structured representation of a strategy.
+
+    Attributes
+    ----------
+    out: List[Dict[str, Any]]
+        List of outbound :class:`actions.tree.TreeSchema` dictionaries.
+    in_: List[Dict[str, Any]]
+        List of inbound :class:`actions.tree.TreeSchema` dictionaries.  The
+        attribute is named ``in_`` to avoid clashing with the ``in`` keyword in
+        Python, but serialisation uses the ``"in"`` key.
+    """
+
+    out: List[Dict[str, Any]]
+    in_: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"out": self.out, "in": self.in_}
+
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> "StrategySchema":
+        return StrategySchema(out=data.get("out", []), in_=data.get("in", []))
 
 
 class Strategy(object):
@@ -15,6 +42,44 @@ class Strategy(object):
 
         self.environment_id = environment_id
         self.fitness = -1000
+
+    # ------------------------------------------------------------------
+    #  Serialisation helpers
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialise this strategy to a dictionary."""
+        return {
+            "out": [tree.to_dict() for tree in self.out_actions],
+            "in": [tree.to_dict() for tree in self.in_actions],
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], logger) -> "Strategy":
+        """Create a :class:`Strategy` from a dictionary."""
+        Strategy.validate_dict(data, logger)
+        out = [actions.tree.ActionTree.from_dict("out", t, logger) for t in data.get("out", [])]
+        inn = [actions.tree.ActionTree.from_dict("in", t, logger) for t in data.get("in", [])]
+        return cls(inn, out)
+
+    @staticmethod
+    def validate_dict(data: Dict[str, Any], logger) -> None:
+        """Validate a strategy dictionary.
+
+        Parameters
+        ----------
+        data: Dict[str, Any]
+            Dictionary describing the strategy.  The function raises
+            ``ValueError`` if the dictionary is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Strategy must be a dictionary")
+        for direction in ("out", "in"):
+            trees = data.get(direction, [])
+            if not isinstance(trees, list):
+                raise ValueError(f"{direction} trees must be a list")
+            for tree in trees:
+                actions.tree.ActionTree.validate_dict(tree, direction, logger)
 
     def __str__(self):
         """
